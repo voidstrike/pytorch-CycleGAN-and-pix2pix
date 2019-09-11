@@ -39,6 +39,7 @@ class AttnCycleGANModel(BaseModel):
         """
         parser.set_defaults(no_dropout=True)  # default CycleGAN did not use dropout
         parser.add_argument('--mask_size', type=int, default=128)
+        parser.add_argument('--concat', type=str, default='rmult')
         if is_train:
             parser.add_argument('--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
             parser.add_argument('--lambda_B', type=float, default=10.0, help='weight for cycle loss (B -> A -> B)')
@@ -80,6 +81,7 @@ class AttnCycleGANModel(BaseModel):
         self.aux_data = aux_dataset.AuxAttnDataset(3000, 3000, self.gpu_ids[0], mask_size=opt.mask_size)
         self.zero_attn_holder = torch.zeors((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.ones_attn_holder = torch.ones((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
+        self.concat = opt.concat
 
         if self.isTrain:  # define discriminators
             self.netD_A = networks.define_D(opt.output_nc, opt.ndf, opt.netD,
@@ -123,24 +125,24 @@ class AttnCycleGANModel(BaseModel):
 
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
-    def forward(self, concat):
+    def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
-        if concat == 'alpha':
+        if self.concat == 'alpha':
             self.fake_B = self.netG_A(torch.cat((self.real_A, self.attn_A), 1))
             self.rec_A = self.netG_B(torch.cat((self.fake_B, self.ones_attn_holder), 1))
             self.fake_A = self.netG_B(torch.cat((self.real_B, self.attn_B), 1))
             self.rec_B = self.netG_A(torch.cat(self.fake_A, self.ones_attn_holder))
-        elif concat == 'mult':
+        elif self.concat == 'mult':
             self.fake_B = self.netG_A(self.real_A * self.attn_A)
             self.rec_A = self.netG_B(self.fake_B)
             self.fake_A = self.netG_B(self.real_B * self.attn_B)
             self.rec_B = self.netG_A(self.fake_A)
-        elif concat == 'residual_mult':
+        elif self.concat == 'rmult':
             self.fake_B = self.netG_A(self.real_A * (1. + self.attn_A))
             self.rec_A = self.netG_B(self.fake_B)
             self.fake_A = self.netG_B(self.real_B * (1. + self.attn_B))
             self.rec_B = self.netG_A(self.fake_A)
-        elif concat == 'none':
+        elif self.concat == 'none':
             self.fake_B = self.netG_A(self.real_A)  # G_A(A)
             self.rec_A = self.netG_B(self.fake_B)  # G_B(G_A(A))
             self.fake_A = self.netG_B(self.real_B)  # G_B(B)
@@ -180,7 +182,7 @@ class AttnCycleGANModel(BaseModel):
         fake_A = self.fake_A_pool.query(self.fake_A)
         self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A)
 
-    def backward_G(self, concat):
+    def backward_G(self):
         """Calculate the loss for generators G_A and G_B"""
         lambda_idt = self.opt.lambda_identity
         lambda_A = self.opt.lambda_A
@@ -194,7 +196,7 @@ class AttnCycleGANModel(BaseModel):
             # self.idt_B = self.netG_B(self.real_A)
             # self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
 
-            if concat == 'alpha':
+            if self.concat == 'alpha':
                 self.idt_A = self.netG_A(torch.cat((self.real_B, self.ones_attn_holder), 1))
                 self.idt_B = self.netG_B(torch.cat((self.real_A, self.ones_attn_holder), 1))
             else:
@@ -222,14 +224,14 @@ class AttnCycleGANModel(BaseModel):
         self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B
         self.loss_G.backward()
 
-    def optimize_parameters(self, concat):
+    def optimize_parameters(self):
         """Calculate losses, gradients, and update network weights; called in every training iteration"""
         # forward
-        self.forward(concat)      # compute fake images and reconstruction images.
+        self.forward()      # compute fake images and reconstruction images.
         # G_A and G_B
         self.set_requires_grad([self.netD_A, self.netD_B], False)  # Ds require no gradients when optimizing Gs
         self.optimizer_G.zero_grad()  # set G_A and G_B's gradients to zero
-        self.backward_G(concat)             # calculate gradients for G_A and G_B
+        self.backward_G()             # calculate gradients for G_A and G_B
         self.optimizer_G.step()       # update G_A and G_B's weights
         # D_A and D_B
         self.set_requires_grad([self.netD_A, self.netD_B], True)
@@ -237,3 +239,5 @@ class AttnCycleGANModel(BaseModel):
         self.backward_D_A()      # calculate gradients for D_A
         self.backward_D_B()      # calculate graidents for D_B
         self.optimizer_D.step()  # update D_A and D_B's weights
+        self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.deatch_(), True)
+        self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach_(), False)
