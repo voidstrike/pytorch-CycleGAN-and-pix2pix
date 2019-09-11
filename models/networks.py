@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import init
 import functools
 from torch.optim import lr_scheduler
+from torch.nn import functional as func
 
 
 ###############################################################################
@@ -198,6 +199,9 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
         net = NLayerDiscriminator(input_nc, ndf, n_layers_D, norm_layer=norm_layer)
     elif netD == 'pixel':     # classify if each pixel is real or fake
         net = PixelDiscriminator(input_nc, ndf, norm_layer=norm_layer)
+    elif netD == 'trainable_attn':
+        net = AttnDiscriminator(input_nc, ndf, norm_layer=norm_layer, mask_shape=128,
+                                inner_s1=(32, 32), inner_s2=(16, 16))
     else:
         raise NotImplementedError('Discriminator model name [%s] is not recognized' % netD)
     return init_net(net, init_type, init_gain, gpu_ids)
@@ -613,3 +617,118 @@ class PixelDiscriminator(nn.Module):
     def forward(self, input):
         """Standard forward."""
         return self.net(input)
+
+
+class attn_module(nn.Module):
+    '''Auxiliary attention module for parallel trainable attention network'''
+
+
+    def __init__(self, in_ch, out_ch, s1=(64, 64), s2=(32, 32)):
+        self.s1, self.s2 = s1, s2
+        super(attn_module, self).__init__()
+        self.mp1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # (128 * 128) -> (64 * 64)
+        self.d1 = nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, bias=False)
+
+        self.mp2 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # (64 * 64) -> (32 * 32)
+        self.d2 = nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, bias=False)
+        self.skip2 = nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, bias=False)
+
+        self.mp3 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)  # (32 * 32) -> (16 * 16)
+
+        self.mid = nn.Sequential(*[
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.ReLU(True),
+            nn.Conv2d(in_ch, in_ch, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.ReLU(True)
+        ])
+
+        self.u2 = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False)
+        self.u1 = nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False)
+
+        self.last = nn.Sequential(*[
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(True),
+            nn.Conv2d(out_ch, out_ch, 1, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.Conv2d(out_ch, out_ch, 1, 1, bias=False),
+            nn.Sigmoid()
+        ])
+
+    def forward(self, x):
+        out = func.relu(self.d1(self.mp1(x)))
+        out = func.relu(self.d2(self.mp2(out)))
+        skip2 = func.relu(self.skip2(out))
+        out = self.mid(out)
+        out = func.interpolate(out, size=self.s2, mode='bilinear', align_corners=True) + skip2
+        # (14 * 14 -> 28 * 28)
+        out = self.last(self.u2(out))
+
+        return out
+
+
+class AttnDiscriminator(nn.Module):
+    # The size of input is assumed to be 256 * 256
+    def __init__(self, in_ch, int_ch, n_layers=3, mask_shape=256, norm_layer=nn.BatchNorm2d, inner_rescale=True,
+                 inner_s1=None, inner_s2=None):
+        super(AttnDiscriminator, self).__init__()
+        if type(norm_layer) == functools.partial:  # no need to use bias as BatchNorm2d has affine parameters
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        kw, padw = 4, 1
+        self.fe = nn.Sequential(*[
+            nn.Conv2d(in_ch, int_ch, kernel_size=kw, stride=2, padding=padw),
+            nn.LeakyReLU(.2, True)
+        ])
+
+        trunk_model = list()
+        nf_mult, nf_mult_prev = 1, 1
+        for i in range(1, n_layers):
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** i, 8)
+
+            trunk_model += [
+                nn.Conv2d(int_ch * nf_mult_prev, int_ch * nf_mult,
+                          kernel_size=kw, stride=2, padding=padw, bias=use_bias),
+                norm_layer(int_ch * nf_mult),
+                nn.LeakyReLU(.2, True)
+            ]
+
+        self.trunk_brunch = nn.Sequential(*trunk_model)
+        if not inner_s1 and not inner_s2:
+            self.mask_brunch = attn_module(int_ch, int_ch * nf_mult)
+        else:
+            self.mask_brunch = attn_module(int_ch, int_ch * nf_mult, inner_s1, inner_s2)
+
+        nf_mult_prev = nf_mult
+        nf_mult = min(2 ** n_layers, 8)
+
+        self.fin_phase = nn.Sequential(*[
+            nn.Conv2d(int_ch * nf_mult_prev, int_ch * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+            norm_layer(int_ch * nf_mult),
+            nn.LeakyReLU(0.2, True),
+            nn.Conv2d(int_ch * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)
+        ])
+
+        self.inner_rescale = inner_rescale
+        self.mask_shape = mask_shape
+
+    def forward(self, x):
+        feature = self.fe(x)
+        trunk = self.trunk_brunch(feature)
+        mask = self.mask_brunch(feature)
+        if not self.inner_rescale:
+            expand_mask = torch.mean(mask, dim=1).unsqueeze(1)
+            expand_mask = func.interpolate(expand_mask, (self.mask_shape, self.mask_shape), mode='bilinear')
+        # expand_mask /= torch.max(expand_mask).item()
+        else:
+            expand_mask = self._mask_rescale(mask)
+
+        return self.fin_phase((mask + 1) * trunk), expand_mask
+
+    def _mask_rescale(self, mask_tensor):
+        mask_tensor = torch.mean(mask_tensor, dim=1).unsqueeze(1)
+        t_max, t_min = torch.max(mask_tensor), torch.min(mask_tensor)
+        mask_tensor = (mask_tensor - t_min) / (t_max - t_min)
+        return func.interpolate(mask_tensor, (self.mask_shape, self.mask_shape), mode='bilinear')
