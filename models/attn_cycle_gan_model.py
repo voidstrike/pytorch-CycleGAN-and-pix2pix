@@ -39,6 +39,8 @@ class AttnCycleGANModel(BaseModel):
         """
         parser.set_defaults(no_dropout=True)  # default CycleGAN did not use dropout
         parser.add_argument('--mask_size', type=int, default=128)
+        parser.add_argument('--s1', type=int, default=32)
+        parser.add_argument('--s2', type=int, default=16)
         parser.add_argument('--concat', type=str, default='rmult')
         if is_train:
             parser.add_argument('--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
@@ -73,25 +75,35 @@ class AttnCycleGANModel(BaseModel):
         # define networks (both Generators and discriminators)
         # The naming is different from those used in the paper.
         # Code (vs. paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
-        self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
-        self.netG_B = networks.define_G(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+
+        if opt.concat != 'alpha':
+            self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+                                            not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+            self.netG_B = networks.define_G(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
+                                            not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+        else:
+            self.netG_A = networks.define_G(4, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+                                            not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+            self.netG_B = networks.define_G(4, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+                                            not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         self.aux_data = aux_dataset.AuxAttnDataset(3000, 3000, self.gpu_ids[0], mask_size=opt.mask_size)
-        self.zero_attn_holder = torch.zeors((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
+        self.zero_attn_holder = torch.zeros((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.ones_attn_holder = torch.ones((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.concat = opt.concat
 
         if self.isTrain:  # define discriminators
             self.netD_A = networks.define_D(opt.output_nc, opt.ndf, opt.netD,
-                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids,
+                                            opt.mask_size, opt.s1, opt.s2)
             self.netD_B = networks.define_D(opt.input_nc, opt.ndf, opt.netD,
-                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+                                            opt.n_layers_D, opt.norm, opt.init_type, opt.init_gain, self.gpu_ids,
+                                            opt.mask_size, opt.s1, opt.s2)
 
         if self.isTrain:
             if opt.lambda_identity > 0.0:  # only works when input and output images have the same number of channels
-                assert(opt.input_nc == opt.output_nc)
+                # assert(opt.input_nc == opt.output_nc)
+                pass
             self.fake_A_pool = ImagePool(opt.pool_size)  # create image buffer to store previously generated images
             self.fake_B_pool = ImagePool(opt.pool_size)  # create image buffer to store previously generated images
             # define loss functions
@@ -131,7 +143,7 @@ class AttnCycleGANModel(BaseModel):
             self.fake_B = self.netG_A(torch.cat((self.real_A, self.attn_A), 1))
             self.rec_A = self.netG_B(torch.cat((self.fake_B, self.ones_attn_holder), 1))
             self.fake_A = self.netG_B(torch.cat((self.real_B, self.attn_B), 1))
-            self.rec_B = self.netG_A(torch.cat(self.fake_A, self.ones_attn_holder))
+            self.rec_B = self.netG_A(torch.cat((self.fake_A, self.ones_attn_holder), 1))
         elif self.concat == 'mult':
             self.fake_B = self.netG_A(self.real_A * self.attn_A)
             self.rec_A = self.netG_B(self.fake_B)
@@ -239,5 +251,5 @@ class AttnCycleGANModel(BaseModel):
         self.backward_D_A()      # calculate gradients for D_A
         self.backward_D_B()      # calculate graidents for D_B
         self.optimizer_D.step()  # update D_A and D_B's weights
-        self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.deatch_(), True)
+        self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.detach_(), True)
         self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach_(), False)
