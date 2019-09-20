@@ -162,6 +162,31 @@ class AttnCycleGANModel(BaseModel):
         else:
             raise NotImplementedError('Unsupported concatenation operation')
 
+    def forward_test(self):
+        """Run forward pass; called by both functions <optimize_parameters> and <test>."""
+        if self.concat == 'alpha':
+            self.fake_B = self.netG_A(torch.cat((self.real_A, self.attn_A), 1))
+            self.rec_A = self.netG_B(torch.cat((self.fake_B, self.ones_attn_holder), 1))
+            self.fake_A = self.netG_B(torch.cat((self.real_B, self.attn_B), 1))
+            self.rec_B = self.netG_A(torch.cat((self.fake_A, self.ones_attn_holder), 1))
+        elif self.concat == 'mult':
+            self.fake_B = self.netG_A(self.real_A * self.attn_A)
+            self.rec_A = self.netG_B(self.fake_B)
+            self.fake_A = self.netG_B(self.real_B * self.attn_B)
+            self.rec_B = self.netG_A(self.fake_A)
+        elif self.concat == 'rmult':
+            self.fake_B = self.netG_A(self.real_A * 1.0)
+            self.rec_A = self.netG_B(self.fake_B)
+            self.fake_A = self.netG_B(self.real_B * 1.0)
+            self.rec_B = self.netG_A(self.fake_A)
+        elif self.concat == 'none':
+            self.fake_B = self.netG_A(self.real_A)  # G_A(A)
+            self.rec_A = self.netG_B(self.fake_B)  # G_B(G_A(A))
+            self.fake_A = self.netG_B(self.real_B)  # G_B(B)
+            self.rec_B = self.netG_A(self.fake_A)  # G_A(G_B(B))
+        else:
+            raise NotImplementedError('Unsupported concatenation operation')
+
     def backward_D_basic(self, netD, real, fake):
         """Calculate GAN loss for the discriminator
 
@@ -253,3 +278,13 @@ class AttnCycleGANModel(BaseModel):
         self.optimizer_D.step()  # update D_A and D_B's weights
         self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.detach_(), True)
         self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach_(), False)
+
+    def test(self):
+        """Forward function used in test time.
+
+        This function wraps <forward> function in no_grad() so we don't save intermediate steps for backprop
+        It also calls <compute_visuals> to produce additional visualization results
+        """
+        with torch.no_grad():
+            self.forward_test()
+            self.compute_visuals()
