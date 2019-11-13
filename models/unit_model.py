@@ -6,7 +6,7 @@ from data import aux_dataset
 from . import networks
 
 
-class AttnCycleGANModel(BaseModel):
+class UNITModel(BaseModel):
     """
     This class implements the CycleGAN model, for learning image-to-image translation without paired data.
 
@@ -45,7 +45,7 @@ class AttnCycleGANModel(BaseModel):
         if is_train:
             parser.add_argument('--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
             parser.add_argument('--lambda_B', type=float, default=10.0, help='weight for cycle loss (B -> A -> B)')
-            parser.add_argument('--lambda_identity', type=float, default=0.0, help='use identity mapping. Setting lambda_identity other than 0 has an effect of scaling the weight of the identity mapping loss. For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, please set lambda_identity = 0.1')
+            parser.add_argument('--lambda_identity', type=float, default=0.5, help='use identity mapping. Setting lambda_identity other than 0 has an effect of scaling the weight of the identity mapping loss. For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, please set lambda_identity = 0.1')
 
         return parser
 
@@ -175,9 +175,9 @@ class AttnCycleGANModel(BaseModel):
             self.fake_A = self.netG_B(self.real_B * self.attn_B)
             self.rec_B = self.netG_A(self.fake_A)
         elif self.concat == 'rmult':
-            self.fake_B = self.netG_A(self.real_A * 1.5)
+            self.fake_B = self.netG_A(self.real_A * 1.0)
             self.rec_A = self.netG_B(self.fake_B)
-            self.fake_A = self.netG_B(self.real_B * 1.5)
+            self.fake_A = self.netG_B(self.real_B * 1.0)
             self.rec_B = self.netG_A(self.fake_A)
         elif self.concat == 'none':
             self.fake_B = self.netG_A(self.real_A)  # G_A(A)
@@ -226,6 +226,13 @@ class AttnCycleGANModel(BaseModel):
         lambda_B = self.opt.lambda_B
         # Identity loss
         if lambda_idt > 0:
+            # # G_A should be identity if real_B is fed: ||G_A(B) - B||
+            # self.idt_A = self.netG_A(self.real_B)
+            # self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
+            # # G_B should be identity if real_A is fed: ||G_B(A) - A||
+            # self.idt_B = self.netG_B(self.real_A)
+            # self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
+
             if self.concat == 'alpha':
                 self.idt_A = self.netG_A(torch.cat((self.real_B, self.ones_attn_holder), 1))
                 self.idt_B = self.netG_B(torch.cat((self.real_A, self.ones_attn_holder), 1))
@@ -236,8 +243,8 @@ class AttnCycleGANModel(BaseModel):
             self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
             self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
         else:
-            self.loss_idt_A = 0.
-            self.loss_idt_B = 0.
+            self.loss_idt_A = 0
+            self.loss_idt_B = 0
 
         dis_A_res, self.tmp_attn_A = self.netD_A(self.fake_B)
         # GAN loss D_A(G_A(A))

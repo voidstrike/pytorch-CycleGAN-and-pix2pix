@@ -202,12 +202,23 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
     elif netD == 'trainable_attn':
         net = AttnDiscriminator(input_nc, ndf, norm_layer=norm_layer, mask_shape=mask_size,
                                 inner_s1=(s1, s1), inner_s2=(s2, s2))
+    elif netD == 'trainable_attn_v2':
+        net = AttnDiscriminator(input_nc, ndf, norm_layer=norm_layer, mask_shape=mask_size,
+                                inner_s1=(s1, s1), inner_s2=(s2, s2), inner_rescale=False)
     elif netD == 'posthoc_attn':
-        net=PHADiscriminator(input_nc, ndf, norm_layer=norm_layer)
+        net = PHADiscriminator(input_nc, ndf, norm_layer=norm_layer)
+    elif netD == 'posthoc_attn_v2':
+        net = PHADiscriminator(input_nc, ndf, norm_layer=norm_layer, inner_rescale=False)
     else:
         raise NotImplementedError('Discriminator model name [%s] is not recognized' % netD)
     return init_net(net, init_type, init_gain, gpu_ids)
 
+
+def define_C(norm='instance', init_type='normal', init_gain=0.02, gpu_ids=[]):
+    norm_layer = get_norm_layer(norm_type=norm)
+    net = SComponent(norm_layer)
+
+    return init_net(net, init_type, init_gain, gpu_ids)
 
 ##############################################################################
 # Classes
@@ -720,20 +731,21 @@ class AttnDiscriminator(nn.Module):
         feature = self.fe(x)
         trunk = self.trunk_brunch(feature)
         mask = self.mask_brunch(feature)
-        if not self.inner_rescale:
-            expand_mask = torch.mean(mask, dim=1).unsqueeze(1)
-            expand_mask = func.interpolate(expand_mask, (self.mask_shape, self.mask_shape), mode='bilinear')
-        # expand_mask /= torch.max(expand_mask).item()
-        else:
-            expand_mask = self._mask_rescale(mask)
+
+        expand_mask = self._mask_rescale(mask, self.inner_rescale)
 
         return self.fin_phase((mask + 1) * trunk), expand_mask
 
-    def _mask_rescale(self, mask_tensor):
+    def _mask_rescale(self, mask_tensor, final_scale=False):
         mask_tensor = torch.mean(mask_tensor, dim=1).unsqueeze(1)
-        t_max, t_min = torch.max(mask_tensor), torch.min(mask_tensor)
-        mask_tensor = (mask_tensor - t_min) / (t_max - t_min)
-        return func.interpolate(mask_tensor, (self.mask_shape, self.mask_shape), mode='bilinear')
+
+        if final_scale:
+            t_max, t_min = torch.max(mask_tensor), torch.min(mask_tensor)
+            mask_tensor = (mask_tensor - t_min) / (t_max - t_min)
+            return func.interpolate(mask_tensor, (self.mask_shape, self.mask_shape), mode='bilinear')
+        else:
+            return mask_tensor
+
 
 class PHADiscriminator(nn.Module):
     """Defines a PatchGAN discriminator"""
@@ -780,104 +792,43 @@ class PHADiscriminator(nn.Module):
         sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
         self.model_p2 = nn.Sequential(*sequence)
         self.attn_mode = attn_mode
-        self.inner_rescale=inner_rescale
-        self.mask_shape = 128
+        self.inner_rescale = inner_rescale
+        self.mask_shape = 256
 
-
-    def forward(self, input):
+    def forward(self, x):
         """Standard forward."""
-        inter = self.model_p1(input)
+        inter = self.model_p1(x)
         res = self.model_p2(inter)
 
-        if not self.inner_rescale:
-            expand_mask = torch.mean(abs(inter), dim=1).unsqueeze(1)
-            expand_mask = func.interpolate(expand_mask, (self.mask_shape, self.mask_shape), mode='bilinear')
-        # expand_mask /= torch.max(expand_mask).item()
-        else:
-            expand_mask = self._mask_rescale(inter)
+        expand_mask = self._mask_rescale(inter, self.inner_rescale)
 
         return res, expand_mask
 
-    def _mask_rescale(self, mask_tensor):
+    def _mask_rescale(self, mask_tensor, final_scale=False):
         mask_tensor = torch.mean(abs(mask_tensor), dim=1).unsqueeze(1)
-        t_max, t_min = torch.max(mask_tensor), torch.min(mask_tensor)
-        mask_tensor = (mask_tensor - t_min) / (t_max - t_min)
-        return func.interpolate(mask_tensor, (self.mask_shape, self.mask_shape), mode='bilinear')
 
-
-class GradADiscriminator(nn.Module):
-    """Defines a PatchGAN discriminator"""
-
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, attn_mode='abs_sum', inner_rescale=True):
-        """Construct a PatchGAN discriminator
-
-        Parameters:
-            input_nc (int)  -- the number of channels in input images
-            ndf (int)       -- the number of filters in the last conv layer
-            n_layers (int)  -- the number of conv layers in the discriminator
-            norm_layer      -- normalization layer
-        """
-        super(GradADiscriminator, self).__init__()
-        if type(norm_layer) == functools.partial:  # no need to use bias as BatchNorm2d has affine parameters
-            use_bias = norm_layer.func == nn.InstanceNorm2d
+        if final_scale:
+            t_max, t_min = torch.max(mask_tensor), torch.min(mask_tensor)
+            mask_tensor = (mask_tensor - t_min) / (t_max - t_min)
+            return func.interpolate(mask_tensor, (self.mask_shape, self.mask_shape), mode='bilinear')
         else:
-            use_bias = norm_layer == nn.InstanceNorm2d
+            return mask_tensor
 
-        kw = 4
-        padw = 1
-        sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
-        nf_mult = 1
-        nf_mult_prev = 1
-        for n in range(1, n_layers):  # gradually increase the number of filters
-            nf_mult_prev = nf_mult
-            nf_mult = min(2 ** n, 8)
-            sequence += [
-                nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                norm_layer(ndf * nf_mult),
-                nn.LeakyReLU(0.2, True)
-            ]
 
-        self.model_p1 = nn.Sequential(*sequence)
+class SComponent(nn.Module):
+    def __init__(self, norm_layer):
+        super(SComponent, self).__init__()
+        sequence = [nn.ConvTranspose2d(1, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                    norm_layer(64),
+                    nn.ReLU(True),
+                    nn.ConvTranspose2d(64, 128, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                    norm_layer(128),
+                    nn.ReLU(True),
+                    nn.ConvTranspose2d(128, 1, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                    norm_layer(64),
+                    nn.Sigmoid()]
 
-        nf_mult_prev = nf_mult
-        nf_mult = min(2 ** n_layers, 8)
-        sequence = [
-            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw, bias=use_bias),
-            norm_layer(ndf * nf_mult),
-            nn.LeakyReLU(0.2, True)
-        ]
+        self.model = nn.Sequential(*sequence)
 
-        sequence += [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]  # output 1 channel prediction map
-        self.model_p2 = nn.Sequential(*sequence)
-        self.attn_mode = attn_mode
-        self.inner_rescale=inner_rescale
-        self.mask_shape = 128
-        self.gradients = None
-
-    def activation_hook(self, grad):
-        self.gradients = grad
-
-    def forward(self, input, requires_map=False):
-        """Standard forward."""
-        inter = self.model_p1(input)
-        inter.register_hook(self.activation_hook)
-        res = self.model_p2(inter)
-
-        if requires_map:
-            attn = self.grad_cam(inter, res)
-            return res, attn
-
-        return res, None
-
-    def grad_cam(self, inter, pred):
-        pred.backward()
-        gradients = self.gradients
-        pooled_gradients = torch.mean(gradients, dim=[0, 2, 3])
-        activations = inter.detach()
-
-        for i in range(256):
-            activations[:, i, :, :] *= pooled_gradients[i]
-        amap = torch.mean(activations, dim=1).squeeze()
-        t_max, t_min = torch.max(amap), torch.min(amap)
-        amap = (amap - t_min) / (t_max - t_min)
-        return func.interpolate(amap, (self.mask_shape, self.mask_shape), mode='bilinear')
+    def forward(self, x):
+        return self.model(x)

@@ -6,7 +6,7 @@ from data import aux_dataset
 from . import networks
 
 
-class AttnCycleGANModel(BaseModel):
+class AttnCycleGANV3Model(BaseModel):
     """
     This class implements the CycleGAN model, for learning image-to-image translation without paired data.
 
@@ -68,13 +68,16 @@ class AttnCycleGANModel(BaseModel):
         self.visual_names = visual_names_A + visual_names_B  # combine visualizations for A and B
         # specify the models you want to save to the disk. The training/test scripts will call <BaseModel.save_networks> and <BaseModel.load_networks>.
         if self.isTrain:
-            self.model_names = ['G_A', 'G_B', 'D_A', 'D_B']
+            self.model_names = ['G_A', 'G_B', 'D_A', 'D_B', 'S_CA', 'S_CB']
         else:  # during test time, only load Gs
-            self.model_names = ['G_A', 'G_B']
+            self.model_names = ['G_A', 'G_B', 'S_CA', 'S_CB']
 
         # define networks (both Generators and discriminators)
         # The naming is different from those used in the paper.
         # Code (vs. paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
+
+        self.netS_CA = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+        self.netS_CB = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if opt.concat != 'alpha':
             self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
@@ -87,7 +90,7 @@ class AttnCycleGANModel(BaseModel):
             self.netG_B = networks.define_G(4, opt.output_nc, opt.ngf, opt.netG, opt.norm,
                                             not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
-        self.aux_data = aux_dataset.AuxAttnDataset(3000, 3000, self.gpu_ids[0], mask_size=opt.mask_size)
+        self.aux_data = aux_dataset.AuxAttnDataset(7000, 7000, self.gpu_ids[0], mask_size=32)
         self.zero_attn_holder = torch.zeros((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.ones_attn_holder = torch.ones((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.concat = opt.concat
@@ -111,7 +114,9 @@ class AttnCycleGANModel(BaseModel):
             self.criterionCycle = torch.nn.L1Loss()
             self.criterionIdt = torch.nn.L1Loss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
-            self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
+            self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters(),
+                                                                self.netS_CA.parameters(), self.netS_CB.parameters()),
+                                                lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(), self.netD_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
@@ -138,22 +143,18 @@ class AttnCycleGANModel(BaseModel):
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
     def forward(self):
-        """Run forward pass; called by both functions <optimize_parameters> and <test>."""
+        concat_attn_A, concat_attn_B = self.netS_CA(self.attn_A), self.netS_CB(self.attn_B)
+
         if self.concat == 'alpha':
-            self.fake_B = self.netG_A(torch.cat((self.real_A, self.attn_A), 1))
+            self.fake_B = self.netG_A(torch.cat((self.real_A, concat_attn_A), 1))
             self.rec_A = self.netG_B(torch.cat((self.fake_B, self.ones_attn_holder), 1))
-            self.fake_A = self.netG_B(torch.cat((self.real_B, self.attn_B), 1))
+            self.fake_A = self.netG_B(torch.cat((self.real_B, concat_attn_B), 1))
             self.rec_B = self.netG_A(torch.cat((self.fake_A, self.ones_attn_holder), 1))
-        elif self.concat == 'mult':
-            self.fake_B = self.netG_A(self.real_A * self.attn_A)
-            self.rec_A = self.netG_B(self.fake_B)
-            self.fake_A = self.netG_B(self.real_B * self.attn_B)
-            self.rec_B = self.netG_A(self.fake_A)
         elif self.concat == 'rmult':
-            self.fake_B = self.netG_A(self.real_A * (1. + self.attn_A))
-            self.rec_A = self.netG_B(self.fake_B)
-            self.fake_A = self.netG_B(self.real_B * (1. + self.attn_B))
-            self.rec_B = self.netG_A(self.fake_A)
+            self.fake_B = self.netG_A(self.real_A * (1. + concat_attn_A))
+            self.rec_A = self.netG_B(self.fake_B * 1.5)
+            self.fake_A = self.netG_B(self.real_B * (1. + concat_attn_B))
+            self.rec_B = self.netG_A(self.fake_A * 1.5)
         elif self.concat == 'none':
             self.fake_B = self.netG_A(self.real_A)  # G_A(A)
             self.rec_A = self.netG_B(self.fake_B)  # G_B(G_A(A))
@@ -164,21 +165,19 @@ class AttnCycleGANModel(BaseModel):
 
     def forward_test(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
+        # Consider More here
+        concat_attn_A, concat_attn_B = self.netS_CA(self.attn_A), self.netS_CB(self.attn_B)
+
         if self.concat == 'alpha':
-            self.fake_B = self.netG_A(torch.cat((self.real_A, self.attn_A), 1))
+            self.fake_B = self.netG_A(torch.cat((self.real_A, concat_attn_A), 1))
             self.rec_A = self.netG_B(torch.cat((self.fake_B, self.ones_attn_holder), 1))
-            self.fake_A = self.netG_B(torch.cat((self.real_B, self.attn_B), 1))
+            self.fake_A = self.netG_B(torch.cat((self.real_B, concat_attn_B), 1))
             self.rec_B = self.netG_A(torch.cat((self.fake_A, self.ones_attn_holder), 1))
-        elif self.concat == 'mult':
-            self.fake_B = self.netG_A(self.real_A * self.attn_A)
-            self.rec_A = self.netG_B(self.fake_B)
-            self.fake_A = self.netG_B(self.real_B * self.attn_B)
-            self.rec_B = self.netG_A(self.fake_A)
         elif self.concat == 'rmult':
-            self.fake_B = self.netG_A(self.real_A * 1.5)
-            self.rec_A = self.netG_B(self.fake_B)
-            self.fake_A = self.netG_B(self.real_B * 1.5)
-            self.rec_B = self.netG_A(self.fake_A)
+            self.fake_B = self.netG_A(self.real_A * (1. + concat_attn_A))
+            self.rec_A = self.netG_B(self.fake_B * 1.5)
+            self.fake_A = self.netG_B(self.real_B * (1. + concat_attn_B))
+            self.rec_B = self.netG_A(self.fake_A * 1.5)
         elif self.concat == 'none':
             self.fake_B = self.netG_A(self.real_A)  # G_A(A)
             self.rec_A = self.netG_B(self.fake_B)  # G_B(G_A(A))
@@ -226,6 +225,13 @@ class AttnCycleGANModel(BaseModel):
         lambda_B = self.opt.lambda_B
         # Identity loss
         if lambda_idt > 0:
+            # # G_A should be identity if real_B is fed: ||G_A(B) - B||
+            # self.idt_A = self.netG_A(self.real_B)
+            # self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
+            # # G_B should be identity if real_A is fed: ||G_B(A) - A||
+            # self.idt_B = self.netG_B(self.real_A)
+            # self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
+
             if self.concat == 'alpha':
                 self.idt_A = self.netG_A(torch.cat((self.real_B, self.ones_attn_holder), 1))
                 self.idt_B = self.netG_B(torch.cat((self.real_A, self.ones_attn_holder), 1))
@@ -236,8 +242,8 @@ class AttnCycleGANModel(BaseModel):
             self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
             self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
         else:
-            self.loss_idt_A = 0.
-            self.loss_idt_B = 0.
+            self.loss_idt_A = 0
+            self.loss_idt_B = 0
 
         dis_A_res, self.tmp_attn_A = self.netD_A(self.fake_B)
         # GAN loss D_A(G_A(A))
@@ -269,8 +275,8 @@ class AttnCycleGANModel(BaseModel):
         self.backward_D_A()      # calculate gradients for D_A
         self.backward_D_B()      # calculate graidents for D_B
         self.optimizer_D.step()  # update D_A and D_B's weights
-        self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.detach_(), True)
-        self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach_(), False)
+        self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.detach(), True)
+        self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach(), False)
 
     def test(self):
         """Forward function used in test time.

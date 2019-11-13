@@ -65,7 +65,7 @@ def save_images_v2(webpage, visuals, image_path, aspect_ratio=1.0, width=256):
     ims, txts, links = [], [], []
 
     for label, im_data in visuals.items():
-        if label != 'fake_B':
+        if label != 'fake_A':
             continue
         im = util.tensor2im(im_data)
         image_name = '%s.png' % (name)
