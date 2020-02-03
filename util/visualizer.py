@@ -65,7 +65,42 @@ def save_images_v2(webpage, visuals, image_path, aspect_ratio=1.0, width=256):
     ims, txts, links = [], [], []
 
     for label, im_data in visuals.items():
-        if label != 'fake_A':
+        if label != 'fake_B':
+           continue
+        im = util.tensor2im(im_data)
+        image_name = '%s.png' % (name)
+        save_path = os.path.join(image_dir, image_name)
+        h, w, _ = im.shape
+
+        util.save_image(im, save_path, aspect_ratio=aspect_ratio)
+
+        ims.append(image_name)
+        txts.append(label)
+        links.append(image_name)
+    webpage.add_images(ims, txts, links, width=width)
+
+
+def save_images_v3(webpage, visuals, image_path, aspect_ratio=1.0, width=256, check_label = 'vis_A2B'):
+    """Save images to the disk.
+
+    Parameters:
+        webpage (the HTML class) -- the HTML webpage class that stores these imaegs (see html.py for more details)
+        visuals (OrderedDict)    -- an ordered dictionary that stores (name, images (either tensor or numpy) ) pairs
+        image_path (str)         -- the string is used to create image paths
+        aspect_ratio (float)     -- the aspect ratio of saved images
+        width (int)              -- the images will be resized to width x width
+
+    This function will save images stored in 'visuals' to the HTML file specified by 'webpage'.
+    """
+    image_dir = webpage.get_image_dir()
+    short_path = ntpath.basename(image_path[0])
+    name = os.path.splitext(short_path)[0]
+
+    webpage.add_header(name)
+    ims, txts, links = [], [], []
+
+    for label, im_data in visuals.items():
+        if label != check_label:
             continue
         im = util.tensor2im(im_data)
         image_name = '%s.png' % (name)

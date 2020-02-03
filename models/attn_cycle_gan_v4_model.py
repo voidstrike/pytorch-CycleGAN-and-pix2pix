@@ -6,7 +6,7 @@ from data import aux_dataset
 from . import networks
 
 
-class AttnCycleGANV3Model(BaseModel):
+class AttnCycleGANV4Model(BaseModel):
     """
     This class implements the CycleGAN model, for learning image-to-image translation without paired data.
 
@@ -59,8 +59,8 @@ class AttnCycleGANV3Model(BaseModel):
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
-        visual_names_A = ['real_A', 'fake_B', 'rec_A']
-        visual_names_B = ['real_B', 'fake_A', 'rec_B']
+        visual_names_A = ['real_A', 'fake_B', 'rec_A', 'vis_A2B']
+        visual_names_B = ['real_B', 'fake_A', 'rec_B', 'vis_B2A']
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
             visual_names_B.append('idt_A')
@@ -90,10 +90,12 @@ class AttnCycleGANV3Model(BaseModel):
             self.netG_B = networks.define_G(4, opt.output_nc, opt.ngf, opt.netG, opt.norm,
                                             not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
-        self.aux_data = aux_dataset.AuxAttnDataset(7000, 7000, self.gpu_ids[0], mask_size=32, given_constant=0.25)
+        self.aux_data = aux_dataset.AuxAttnDataset(7000, 7000, self.gpu_ids[0], mask_size=32)
         self.zero_attn_holder = torch.zeros((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.ones_attn_holder = torch.ones((1, 1, opt.mask_size, opt.mask_size), dtype=torch.float32).to(self.device)
         self.concat = opt.concat
+        self.vis_A2B, self.vis_B2A = torch.zeros((1, 1, 256, 256), dtype=torch.float32).to(self.device), \
+                                     torch.zeros((1, 1, 256, 256), dtype=torch.float32).to(self.device)
 
         if self.isTrain:  # define discriminators
             self.netD_A = networks.define_D(opt.output_nc, opt.ndf, opt.netD,
@@ -140,10 +142,11 @@ class AttnCycleGANV3Model(BaseModel):
         else:
             self.attn_B, self.attn_A = self.aux_data.get_attn_map(self.attn_A_index, self.attn_B_index)
 
-        self.image_paths = input['A_paths' if AtoB else 'B_paths']
+        self.image_paths = [input['A_paths'], input['B_paths']]
 
     def forward(self):
         concat_attn_A, concat_attn_B = self.netS_CA(self.attn_A), self.netS_CB(self.attn_B)
+        self.vis_A2B, self.vis_B2A = (concat_attn_A - .5) / .5, (concat_attn_B - .5) / .5
 
         if self.concat == 'alpha':
             self.fake_B = self.netG_A(torch.cat((self.real_A, concat_attn_A), 1))
@@ -278,6 +281,24 @@ class AttnCycleGANV3Model(BaseModel):
         self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.detach(), True)
         self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach(), False)
 
+    def optimize_parameters_attn(self):
+        """Calculate losses, gradients, and update network weights; called in every training iteration"""
+        # forward
+        self.forward()      # compute fake images and reconstruction images.
+        # G_A and G_B
+        self.set_requires_grad([self.netD_A, self.netD_B], False)  # Ds require no gradients when optimizing Gs
+        self.optimizer_G.zero_grad()  # set G_A and G_B's gradients to zero
+        self.backward_G()             # calculate gradients for G_A and G_B
+        self.optimizer_G.step()       # update G_A and G_B's weights
+        # D_A and D_B
+        self.set_requires_grad([self.netD_A, self.netD_B], True)
+        self.optimizer_D.zero_grad()   # set D_A and D_B's gradients to zero
+        self.backward_D_A()      # calculate gradients for D_A
+        self.backward_D_B()      # calculate graidents for D_B
+        self.optimizer_D.step()  # update D_A and D_B's weights
+        self.aux_data.update_attn_map(self.attn_A_index, self.tmp_attn_A.detach(), True)
+        self.aux_data.update_attn_map(self.attn_B_index, self.tmp_attn_B.detach(), False)
+
     def test(self):
         """Forward function used in test time.
 
@@ -287,3 +308,4 @@ class AttnCycleGANV3Model(BaseModel):
         with torch.no_grad():
             self.forward_test()
             self.compute_visuals()
+

@@ -2,12 +2,12 @@ import torch
 from torch.utils.data import Dataset
 
 class AuxAttnDataset(Dataset):
-    def __init__(self, size_A, size_B, device, init_method='one', mask_size=256):
+    def __init__(self, size_A, size_B, device, init_method='one', mask_size=256, given_constant=1):
         super(AuxAttnDataset, self).__init__()
         self.A_size, self.B_size = size_A, size_B
         if init_method == 'one':
-            self.A_attns = torch.ones((size_A, 1, mask_size, mask_size), dtype=torch.float32)
-            self.B_attns = torch.ones((size_B, 1, mask_size, mask_size), dtype=torch.float32)
+            self.A_attns = torch.ones((size_A, 1, mask_size, mask_size), dtype=torch.float32) * given_constant
+            self.B_attns = torch.ones((size_B, 1, mask_size, mask_size), dtype=torch.float32) * given_constant
         elif init_method == 'random':
             self.A_attns = torch.rand((size_A, 1, mask_size, mask_size), dtype=torch.float32)
             self.B_attns = torch.rand((size_B, 1, mask_size, mask_size), dtype=torch.float32)
