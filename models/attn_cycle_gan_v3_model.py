@@ -155,10 +155,14 @@ class AttnCycleGANV3Model(BaseModel):
             self.fake_A = self.netG_B(torch.cat((self.real_B, concat_attn_B), 1))
             self.rec_B = self.netG_A(torch.cat((self.fake_A, self.ones_attn_holder), 1))
         elif self.concat == 'rmult':
-            self.fake_B = self.netG_A(self.real_A * (1. + concat_attn_A))
-            self.rec_A = self.netG_B(self.fake_B * 1.5)
-            self.fake_A = self.netG_B(self.real_B * (1. + concat_attn_B))
-            self.rec_B = self.netG_A(self.fake_A * 1.5)
+            # self.fake_B = self.netG_A(self.real_A * (1. + concat_attn_A))
+            # self.rec_A = self.netG_B(self.fake_B * 1.5)
+            # self.fake_A = self.netG_B(self.real_B * (1. + concat_attn_B))
+            # self.rec_B = self.netG_A(self.fake_A * 1.5)
+            self.fake_B = self.netG_A(self.real_A, concat_attn_A)
+            self.rec_A = self.netG_B(self.fake_B, self.zero_attn_holder)
+            self.fake_A = self.netG_B(self.real_B, concat_attn_B)
+            self.rec_B = self.netG_A(self.fake_A, self.zero_attn_holder)
         elif self.concat == 'none':
             self.fake_B = self.netG_A(self.real_A)  # G_A(A)
             self.rec_A = self.netG_B(self.fake_B)  # G_B(G_A(A))
