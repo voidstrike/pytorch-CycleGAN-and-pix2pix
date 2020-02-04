@@ -127,7 +127,7 @@ class AttnCycleGANV5Model(BaseModel):
 
         self.image_paths = [input['A_paths'], input['B_paths']]
 
-    def forward(self, mode=True):
+    def forward(self, mode=False):
         #  Forward phase for training phase.
         #  Mode = True will execute the out-iteration attention & False will leads to in-iteration attention
         if mode:
@@ -136,7 +136,7 @@ class AttnCycleGANV5Model(BaseModel):
             # Disable the gradient of the Discriminator during in-iteration attention
             self.set_requires_grad([self.netD_A, self.netD_B], False)
 
-        self.vis_A2B, self.vis_B2A = (concat_attn_A - .5) / .5, (concat_attn_B - .5) / .5
+        #self.vis_A2B, self.vis_B2A = (concat_attn_A - .5) / .5, (concat_attn_B - .5) / .5
 
         if self.concat == 'alpha':
             if mode:
