@@ -76,8 +76,12 @@ class AttnCycleGANV3Model(BaseModel):
         # The naming is different from those used in the paper.
         # Code (vs. paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
 
-        self.netS_CA = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
-        self.netS_CB = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+        if 'resnet_9blocks_2' == opt.netG or 'resnet_9blocks_3' == opt.netG or 'resnet_9blocks_4' == opt.netG:
+            self.netS_CA = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids, mode=1)
+            self.netS_CB = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids, mode=1)
+        else:
+            self.netS_CA = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
+            self.netS_CB = networks.define_C(opt.norm, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if opt.concat != 'alpha':
             self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,

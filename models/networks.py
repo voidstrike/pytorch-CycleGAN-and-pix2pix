@@ -149,6 +149,14 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
 
     if netG == 'resnet_9blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+    elif netG == 'resnet_9blocks_1':
+        net = InterResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, split_mode=1)
+    elif netG == 'resnet_9blocks_2':
+        net = InterResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, split_mode=2)
+    elif netG == 'resnet_9blocks_3':
+        net = InterResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, split_mode=3)
+    elif netG == 'resnet_9blocks_4':
+        net = InterResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9, split_mode=4)
     elif netG == 'resnet_6blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
     elif netG == 'unet_128':
@@ -214,9 +222,9 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
     return init_net(net, init_type, init_gain, gpu_ids)
 
 
-def define_C(norm='instance', init_type='normal', init_gain=0.02, gpu_ids=[]):
+def define_C(norm='instance', init_type='normal', init_gain=0.02, gpu_ids=[], mode=0):
     norm_layer = get_norm_layer(norm_type=norm)
-    net = SComponent(norm_layer)
+    net = SComponent(norm_layer, mode)
 
     return init_net(net, init_type, init_gain, gpu_ids)
 
@@ -388,6 +396,93 @@ class ResnetGenerator(nn.Module):
     def forward(self, input):
         """Standard forward"""
         return self.model(input)
+
+
+class InterResnetGenerator(nn.Module):
+    """Resnet-based generator that consists of Resnet blocks between a few downsampling/upsampling operations.
+
+    We adapt Torch code and idea from Justin Johnson's neural style transfer project(https://github.com/jcjohnson/fast-neural-style)
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect', split_mode=0):
+        """Construct a Resnet-based generator
+
+        Parameters:
+            input_nc (int)      -- the number of channels in input images
+            output_nc (int)     -- the number of channels in output images
+            ngf (int)           -- the number of filters in the last conv layer
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers
+            n_blocks (int)      -- the number of ResNet blocks
+            padding_type (str)  -- the name of padding layer in conv layers: reflect | replicate | zero
+            split_mode = 0: No split
+            split_mode = 1: Split the model at the beginning of down-sampling layer
+            split_mode = 2: Split the model at the beginning of residual block chain
+            split_mode = 3: Split the model at the middle of residual block chain
+            split_mode = 4: Split the model at the end of residual block chain
+
+        """
+        assert(n_blocks >= 0)
+        if split_mode not in [0, 1, 2, 3, 4]:
+            raise Exception('Unsupported split mode selected')
+        super(InterResnetGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        if split_mode == 1:
+            self.model1 = nn.Sequential(*model)
+            model = list()
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        if split_mode == 2:
+            self.model1 = nn.Sequential(*model)
+            model = list()
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):       # add ResNet blocks
+
+            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+            if 4 == i and 3 == split_mode:
+                self.model1 = nn.Sequential(*model)
+                model = list()
+
+        if split_mode == 4:
+            self.model1 = nn.Sequential(*model)
+            model = list()
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+
+        self.model2 = nn.Sequential(*model)
+
+    def forward(self, input, attn):
+        """Standard forward"""
+        inter = self.model1(input)
+        new_attn = attn.expand_as(inter)
+
+        return self.model2(inter * (1. + new_attn))
 
 
 class ResnetBlock(nn.Module):
@@ -816,17 +911,28 @@ class PHADiscriminator(nn.Module):
 
 
 class SComponent(nn.Module):
-    def __init__(self, norm_layer):
+    def __init__(self, norm_layer, mode=0):
         super(SComponent, self).__init__()
-        sequence = [nn.ConvTranspose2d(1, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
-                    norm_layer(64),
-                    nn.ReLU(True),
-                    nn.ConvTranspose2d(64, 128, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
-                    norm_layer(128),
-                    nn.ReLU(True),
-                    nn.ConvTranspose2d(128, 1, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
-                    norm_layer(64),
-                    nn.Sigmoid()]
+        if 0 == mode:
+            sequence = [nn.ConvTranspose2d(1, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                        norm_layer(64),
+                        nn.ReLU(True),
+                        nn.ConvTranspose2d(64, 128, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                        norm_layer(128),
+                        nn.ReLU(True),
+                        nn.ConvTranspose2d(128, 1, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                        norm_layer(64),
+                        nn.Sigmoid()]
+        else:
+            sequence = [nn.ConvTranspose2d(1, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
+                        norm_layer(64),
+                        nn.ReLU(True),
+                        nn.ConvTranspose2d(64, 128, kernel_size=3, padding=1, bias=True),
+                        norm_layer(128),
+                        nn.ReLU(True),
+                        nn.ConvTranspose2d(128, 1, kernel_size=3, padding=1, bias=True),
+                        norm_layer(64),
+                        nn.Sigmoid()]
 
         self.model = nn.Sequential(*sequence)
 
