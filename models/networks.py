@@ -927,10 +927,10 @@ class SComponent(nn.Module):
             sequence = [nn.ConvTranspose2d(1, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=True),
                         norm_layer(64),
                         nn.ReLU(True),
-                        nn.ConvTranspose2d(64, 128, kernel_size=3, padding=1, bias=True),
+                        nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=True),
                         norm_layer(128),
                         nn.ReLU(True),
-                        nn.ConvTranspose2d(128, 1, kernel_size=3, padding=1, bias=True),
+                        nn.Conv2d(128, 1, kernel_size=3, padding=1, bias=True),
                         norm_layer(64),
                         nn.Sigmoid()]
 
