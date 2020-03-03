@@ -455,7 +455,7 @@ class InterResnetGenerator(nn.Module):
         for i in range(n_blocks):       # add ResNet blocks
 
             model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
-            if 4 == i and 3 == split_mode:
+            if 3 == i and 3 == split_mode:
                 self.model1 = nn.Sequential(*model)
                 model = list()
 
@@ -480,6 +480,7 @@ class InterResnetGenerator(nn.Module):
     def forward(self, input, attn):
         """Standard forward"""
         inter = self.model1(input)
+        print(inter.shape)
         new_attn = attn.expand_as(inter)
 
         return self.model2(inter * (1. + new_attn))
@@ -650,7 +651,7 @@ class UnetSkipConnectionBlock(nn.Module):
 class NLayerDiscriminator(nn.Module):
     """Defines a PatchGAN discriminator"""
 
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d):
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, kw=4):
         """Construct a PatchGAN discriminator
 
         Parameters:
@@ -665,7 +666,7 @@ class NLayerDiscriminator(nn.Module):
         else:
             use_bias = norm_layer == nn.InstanceNorm2d
 
-        kw = 4
+        kw = kw
         padw = 1
         sequence = [nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]
         nf_mult = 1
